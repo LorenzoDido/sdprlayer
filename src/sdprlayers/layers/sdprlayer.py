@@ -37,6 +37,23 @@ ER_MIN = 1e5
 _QCQP_HISTORY_BUFFER = []
 _QCQP_MAX_HISTORY = 5
 
+def _qcqp_save_conditions_history(xs, Hs, Q, params, mults):
+    global _QCQP_HISTORY_BUFFER, _QCQP_MAX_HISTORY
+    # Store current iteration data BEFORE processing
+    current_iter_data = {
+        'xs': xs.detach().cpu().numpy().copy(),
+        'Hs': [H.copy() if isinstance(H, np.ndarray) else H for H in Hs],
+        'objective': Q,
+        'params': [p.detach().cpu().numpy().copy() for p in params],
+        'multipliers': [m.copy() if isinstance(m, np.ndarray) else m for m in mults],
+    }
+    _QCQP_HISTORY_BUFFER.append(current_iter_data)
+    if len(_QCQP_HISTORY_BUFFER) > _QCQP_MAX_HISTORY:
+        _QCQP_HISTORY_BUFFER.pop(0)
+
+def get_last_qcqp_entry():
+    """Return the last QCQP history entry, or None if empty."""
+    return _QCQP_HISTORY_BUFFER[-1] if _QCQP_HISTORY_BUFFER else None
 
 class SDPRLayer(CvxpyLayer):
     """
@@ -350,6 +367,10 @@ class SDPRLayer(CvxpyLayer):
                 if not tight:
                     alltight = False
                     break
+
+            #Store current iteration data in history buffer
+            _qcqp_save_conditions_history(xs, Hs, param_vals_h[0].detach().cpu().numpy(), param_vals, mults)
+            
             # If using nonconvex backprop, overwrite solution IF all problems are tight.
             if alltight:
                 # Overwrite solution using QCQP autograd function
@@ -540,17 +561,6 @@ def _QCQPDiffFn(
                 "All parameters have not been used in QCQP Forward!"
             )
             ctx.param_dict = param_dict
-
-            # Store current iteration data BEFORE processing
-            current_iter_data = {
-                'xs': xs.detach().cpu().numpy().copy(),
-                'Hs': [H.copy() if isinstance(H, np.ndarray) else H for H in Hs],
-                'params': [p.detach().cpu().numpy().copy() for p in params],
-            }
-            _QCQP_HISTORY_BUFFER.append(current_iter_data)
-            if len(_QCQP_HISTORY_BUFFER) > _QCQP_MAX_HISTORY:
-                _QCQP_HISTORY_BUFFER.pop(0)
-            
             # Store solution and certificate matrix
             ctx.xs = xs.detach().cpu().numpy()
             ctx.Hs = Hs

@@ -352,13 +352,13 @@ class SDPRLayer(CvxpyLayer):
             Hs = [cones.unvec_symm(h, self.n_vars) for h in hs]
             #check compilation warnings
             for i, H in enumerate(Hs):
-                H_rank = np.linalg.matrix_rank(Hs, tol=1e-10)
-                H_corank = H.shape[0] - H_rank
+                H_eval = np.linalg.eigvalsh(H)
+                H_corank = np.sum(H_eval < 1e-10)
+                H_rank = np.sum(H_eval > 1e-10)
                 if H_corank != 1:
-                    H_evals = np.linalg.eigvalsh(H) 
                     print(f"\nWARNING: Certificate matrix H {i}has corank {H_corank} (expected corank 1)")
                     print(f"H rank: {H_rank} (expected {H.shape[0] - 1})")
-                    print(f"H eigenvalues (sorted): {np.sort(H_evals)}")
+                    print(f"H eigenvalues (sorted): {H_eval}")
                     print(f"This may indicate numerical issues or loose relaxation")
             # Check that the whole batch is tight.
             alltight = True

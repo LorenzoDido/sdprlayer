@@ -920,7 +920,7 @@ class SDPRLayerMosek(SDPRLayer):
         # Call SDPRLayer init
         super().__init__(**kwargs)
 
-    def forward(self, *param_vals, verbose=False, mosek_params=None, **kwargs):
+    def forward(self, *param_vals, verbose=False, accept_unknown=False, mosek_params=None, **kwargs):
 
         # Process the input parameters
         param_vals_h, n_batch, n_dims = self.preprocess_input_params(*param_vals)
@@ -940,11 +940,16 @@ class SDPRLayerMosek(SDPRLayer):
                 mosek_params = self.mosek_params
             # Solve the problem
             self.problem.solve(
-                solver=cp.MOSEK, verbose=verbose, mosek_params=mosek_params
+                solver=cp.MOSEK, verbose=verbose, accept_unknown=accept_unknown, mosek_params=mosek_params
             )
             # Solver check
-            if not self.problem.status == "optimal":
-                raise ValueError("MOSEK did not converge")
+            if accept_unknown and self.problem.status == "optimal_inaccurate":
+                print("Warning: MOSEK returned optimal_inaccurate status")
+            elif not self.problem.status == "optimal":
+                raise ValueError(
+                    f"MOSEK returned '{self.problem.status}' problem status. MOSEK did not converge\n"
+                )
+            
             # Extract primal and dual variables
             X = np.array(self.problem.constraints[0].dual_value)
             H = np.array(self.H.value)

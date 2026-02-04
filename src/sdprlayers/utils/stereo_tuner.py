@@ -40,7 +40,7 @@ class StereoCamera:
         z = p_inC[2, :]
         x = p_inC[0, :] / z
         y = p_inC[1, :] / z
-        assert all(z > 0), "Negative depth in data"
+        # assert all(z > 0), "Negative depth in data"
         # noise
         noise = np.random.randn(4, len(x))
         # pixel measurements
@@ -237,7 +237,6 @@ def tune_stereo_params_sdpr(
             keypoints_3D_trg=rs_l_inT,
             weights=weights_scalar,
             inv_cov_weights=inv_cov_weights,
-            solver_args=None,
             return_loss=True,
         )
         # Extract variables

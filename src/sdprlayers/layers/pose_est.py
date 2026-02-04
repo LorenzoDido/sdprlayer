@@ -95,7 +95,16 @@ class SDPPoseEstimator(nn.Module):
         # Run layer
         with record_function("SDPR: Run Optimization"):
             Xs, xs = self.sdprlayer(Qs, verbose=verbose, mosek_params=mosek_params)
+        if xs is None:
+            print("warning: SDP solver failed to find a solution.")
+            print("batch size: ",len(Xs))
 
+        for X_tightness in Xs:
+            tight, ER = self.sdprlayer.check_tightness(X_tightness)
+            if not tight:
+                print(
+                    f"WARNING: Solution not tight! (ER={ER:.2e})"
+                )   
         # Extract solution
         t_trg_src_intrg = xs[:, 10:]
         R_trg_src = torch.reshape(xs[:, 1:10], (-1, 3, 3)).transpose(-1, -2)

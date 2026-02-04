@@ -395,6 +395,9 @@ class SDPRLayer(CvxpyLayer):
                 xs = qcqp_func(*param_vals_h)
             else:
                 xs = None
+                #prova
+                print("\nWARNING: Solution not tight! using approximate recovery.")
+                xs = self.recovery_map(Xs)
         else:
             # Compute the solution using CvxpyLayers.
             soln = super().forward(*param_vals_h, **kwargs)

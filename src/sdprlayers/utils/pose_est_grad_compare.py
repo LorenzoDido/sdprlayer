@@ -7,7 +7,7 @@ import torch
 from pandas import DataFrame, read_pickle
 from tqdm import tqdm
 
-from _scripts.stereo_cal import get_cal_data
+from sdprlayers.utils.stereo_cal import get_cal_data
 from sdprlayers import LieOptPoseEstimator, SDPPoseEstimator, SVDPoseEstimator
 from sdprlayers.utils.lie_algebra import se3_exp, se3_inv, se3_log
 from sdprlayers.utils.stereo_tuner import StereoCamera

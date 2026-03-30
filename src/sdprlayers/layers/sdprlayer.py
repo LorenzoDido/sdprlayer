@@ -25,6 +25,8 @@ mosek_params_dflt = {
 LICQ_TOL = 1e-8
 # Tolerance for norm of residuals of the KKT conditions.
 KKT_TOL = 1e-5
+# Treat tiny negative certificate eigenvalues as numerical zero.
+CERT_EIG_ZERO_TOL = 1e-9
 # Tolerance for residuals in LSQR solve
 # (see https://docs.scipy.org/doc/scipy/reference/generated/scipy.sparse.linalg.lsqr.html#lsqr)
 LSQR_TOL = 1e-12
@@ -36,6 +38,27 @@ ER_MIN = 1e5
 
 _QCQP_HISTORY_BUFFER = []
 _QCQP_MAX_HISTORY = 5
+
+
+def _qcqp_find_prev_compatible_history(current_batch_dim):
+    for hist in reversed(_QCQP_HISTORY_BUFFER[:-1]):
+        objective = hist.get("objective")
+        hist_batch_dim = objective.shape[0] if hasattr(objective, "shape") and len(objective.shape) > 2 else 1
+        if (
+            hist_batch_dim == current_batch_dim
+            and hist.get("xs", np.empty((0,))).shape[0] == current_batch_dim
+            and len(hist.get("Hs", [])) == current_batch_dim
+        ):
+            return hist
+    return None
+
+
+def _certificate_stats(H, zero_tol=CERT_EIG_ZERO_TOL):
+    evals = np.linalg.eigvalsh(H)
+    rank = np.count_nonzero(evals > zero_tol)
+    corank = H.shape[0] - rank
+    return evals, rank, corank
+
 
 def _qcqp_save_conditions_history(xs, Hs, Q, params, mults):
     global _QCQP_HISTORY_BUFFER, _QCQP_MAX_HISTORY
@@ -54,6 +77,29 @@ def _qcqp_save_conditions_history(xs, Hs, Q, params, mults):
 def get_last_qcqp_entry():
     """Return the last QCQP history entry, or None if empty."""
     return _QCQP_HISTORY_BUFFER[-1] if _QCQP_HISTORY_BUFFER else None
+
+
+def _append_zero_backward_sample(
+    *,
+    sample_idx,
+    reason,
+    nvars,
+    n_constraints,
+    dH_bar,
+    dA_quad,
+    dy_bar_2_list,
+    mult_list,
+    needs_multipliers,
+):
+    print(
+        f"WARNING: Skipping backward contribution for sample {sample_idx} "
+        f"because {reason}."
+    )
+    dH_bar.append(np.zeros((nvars, nvars)))
+    dA_quad.append(np.zeros((nvars, nvars)))
+    dy_bar_2_list.append(np.zeros(n_constraints))
+    if needs_multipliers:
+        mult_list.append([np.zeros(n_constraints)])
 
 class SDPRLayer(CvxpyLayer):
     """
@@ -352,9 +398,7 @@ class SDPRLayer(CvxpyLayer):
             Hs = [cones.unvec_symm(h, self.n_vars) for h in hs]
             #check compilation warnings
             for i, H in enumerate(Hs):
-                H_eval = np.linalg.eigvalsh(H)
-                H_corank = np.sum(H_eval < 1e-10)
-                H_rank = np.sum(H_eval > 1e-10)
+                H_eval, H_rank, H_corank = _certificate_stats(H)
                 if H_corank != 1:
                     print(f"\nWARNING: Certificate matrix H {i}has corank {H_corank} (expected corank 1)")
                     print(f"H rank: {H_rank} (expected {H.shape[0] - 1})")
@@ -649,17 +693,15 @@ def _QCQPDiffFn(
                     dz_bar = np.vstack([-grad_output[b], np.zeros((G.shape[0], 1))])
 
                 #check compilation warnings
-                H_rank = np.linalg.matrix_rank(H, tol=1e-10)
-                H_corank = H.shape[0] - H_rank
+                H_evals, H_rank, H_corank = _certificate_stats(H)
                 if H_corank != 1:
-                    H_evals = np.linalg.eigvalsh(H) 
                     print(f"\nWARNING: Certificate matrix H has corank {H_corank} (expected corank 1)")
                     print(f"H rank: {H_rank} (expected {H.shape[0] - 1})")
                     print(f"H eigenvalues (sorted): {np.sort(H_evals)}")
                     print(f"This may indicate numerical issues or loose relaxation")
                     # Print history
-                    if len(_QCQP_HISTORY_BUFFER) >= 2:
-                        hist = _QCQP_HISTORY_BUFFER[-2]  # Second-to-last = previous iteration
+                    hist = _qcqp_find_prev_compatible_history(batch_dim)
+                    if hist is not None:
                         print("\n" + "-"*80)
                         print("PREVIOUS ITERATION")
                         print("-"*80)
@@ -669,8 +711,8 @@ def _QCQPDiffFn(
                                 H_prev_evals = np.linalg.eigvalsh(H_prev)
                                 print(f"Previous H eigenvalues: {np.sort(H_prev_evals)}")
                                 print(f"Previous H rank: {np.linalg.matrix_rank(H_prev, tol=1e-10)}")                        
-                        if len(hist['params']) > 0 and ctx.param_dict['objective']:
-                            Q_prev = hist['params'][0]
+                        if hist.get('objective') is not None and ctx.param_dict['objective']:
+                            Q_prev = hist['objective']
                             if len(Q_prev.shape) > 2:
                                 Q_prev = Q_prev[b]
                             if len(ctx.objective.shape) > 2:
@@ -719,8 +761,8 @@ def _QCQPDiffFn(
                     print(f"||x||: {np.linalg.norm(x)}")
 
                     # Print previous iteration only
-                    if len(_QCQP_HISTORY_BUFFER) >= 2:
-                        hist = _QCQP_HISTORY_BUFFER[-2]  # Previous iteration
+                    hist = _qcqp_find_prev_compatible_history(batch_dim)
+                    if hist is not None:
                         print("\n" + "-"*80)
                         print("PREVIOUS ITERATION")
                         print("-"*80)
@@ -740,8 +782,8 @@ def _QCQPDiffFn(
                                 print(f"Previous H @ x_prev norm: {np.linalg.norm(H_prev @ x_prev):.6e}")
                                 print(f"Change in H (Frobenius): {np.linalg.norm(H - H_prev, 'fro'):.6e}")
                         
-                        if len(hist['params']) > 0 and ctx.param_dict['objective']:
-                            Q_prev = hist['params'][0]
+                        if hist.get('objective') is not None and ctx.param_dict['objective']:
+                            Q_prev = hist['objective']
                             if len(Q_prev.shape) > 2:
                                 Q_prev = Q_prev[b]
                             Q_prev_evals = np.linalg.eigvalsh(Q_prev)
@@ -751,7 +793,18 @@ def _QCQPDiffFn(
                         print("-"*80)
 
                     print("="*80 + "\n")
-                    raise e
+                    _append_zero_backward_sample(
+                        sample_idx=b,
+                        reason=f"certificate KKT residual {np.linalg.norm(H @ x):.6e} exceeds tolerance {ctx.kkt_tol:.6e}",
+                        nvars=H.shape[0],
+                        n_constraints=len(ctx.constraints),
+                        dH_bar=dH_bar,
+                        dA_quad=dA_quad,
+                        dy_bar_2_list=dy_bar_2_list,
+                        mult_list=mult_list,
+                        needs_multipliers=ctx.compute_multipliers or ctx.mults is None,
+                    )
+                    continue
 
                 # Solve Differential KKT System
                 if M.shape[0] == M.shape[1]:
@@ -808,8 +861,8 @@ def _QCQPDiffFn(
                     print(f"\nKKT Solve Residual: {res} (tolerance: {ctx.kkt_tol})")
 
                     # Print previous iteration only
-                    if len(_QCQP_HISTORY_BUFFER) >= 2:
-                        hist = _QCQP_HISTORY_BUFFER[-2]
+                    hist = _qcqp_find_prev_compatible_history(batch_dim)
+                    if hist is not None:
                         print("\n" + "-"*80)
                         print("PREVIOUS ITERATION")
                         print("-"*80)
@@ -829,8 +882,8 @@ def _QCQPDiffFn(
                                 print(f"Previous H @ x_prev norm: {np.linalg.norm(H_prev @ x_prev):.6e}")
                                 print(f"Change in H (Frobenius): {np.linalg.norm(H - H_prev, 'fro'):.6e}")
                         
-                        if len(hist['params']) > 0 and ctx.param_dict['objective']:
-                            Q_prev = hist['params'][0]
+                        if hist.get('objective') is not None and ctx.param_dict['objective']:
+                            Q_prev = hist['objective']
                             if len(Q_prev.shape) > 2:
                                 Q_prev = Q_prev[b]
                             Q_prev_evals = np.linalg.eigvalsh(Q_prev)
@@ -840,7 +893,18 @@ def _QCQPDiffFn(
                         print("-"*80)
 
                     print("="*80 + "\n")
-                    raise e
+                    _append_zero_backward_sample(
+                        sample_idx=b,
+                        reason=f"differential KKT residual {res:.6e} exceeds tolerance {ctx.kkt_tol:.6e}",
+                        nvars=H.shape[0],
+                        n_constraints=len(ctx.constraints),
+                        dH_bar=dH_bar,
+                        dA_quad=dA_quad,
+                        dy_bar_2_list=dy_bar_2_list,
+                        mult_list=mult_list,
+                        needs_multipliers=ctx.compute_multipliers or ctx.mults is None,
+                    )
+                    continue
                 dy_bar = sol
                 dy_bar_1 = dy_bar[:nvars, :]
                 # Fill with zeros at redundant entries
